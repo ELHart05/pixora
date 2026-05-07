@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { fabric } from "fabric";
 import { FabricJSCanvas, useFabricJSEditor } from "fabricjs-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import {
   addImage,
   onAddCircle,
@@ -15,7 +15,7 @@ import {
 import {
   BsCircle, BsChatLeftText, BsFillImageFill,
   BsPencilFill, BsVectorPen, BsArrowLeft,
-  BsStar, BsBoundingBox, BsBoundingBoxCircles,
+  BsStar, BsBoundingBox, BsBoundingBoxCircles, BsShare, BsClockHistory, BsThreeDotsVertical, BsX,
 } from "react-icons/bs";
 import { BiRectangle } from "react-icons/bi";
 import { RxArrowDown, RxArrowUp } from "react-icons/rx";
@@ -31,6 +31,13 @@ import { useFont } from "../components/fontContext";
 import { removeRulerOnMoveMarker, RULER_LINES } from "../ruler";
 import ColorPicker from "react-pick-color";
 import TextPanel from "../components/TextPanel";
+import { ShareModal } from "../components/ShareModal";
+import { SharePrivateModal } from "../components/SharePrivateModal";
+import { AuthModal } from "../components/AuthModal";
+import { HistoryPanel } from "../components/HistoryPanel";
+import { useAuth } from "../context/AuthContext";
+import { consumePendingEditorCanvasLoad, EDITOR_LOAD_EVENT } from "../lib/editorLoad";
+import { trpc } from "../lib/trpc";
 
 // ─── Toolbar button helper ────────────────────────────────────────────────────
 function ToolBtn({ title, active, onClick, disabled, children, danger }) {
@@ -50,18 +57,6 @@ function ToolBtn({ title, active, onClick, disabled, children, danger }) {
     >
       {children}
     </button>
-  );
-}
-
-// ─── Sidebar section divider ──────────────────────────────────────────────────
-function SideSection({ label, children }) {
-  return (
-    <div className="flex flex-col gap-1 px-1">
-      <span className="text-[10px] font-semibold uppercase tracking-widest text-white/25 px-1 mb-0.5">
-        {label}
-      </span>
-      {children}
-    </div>
   );
 }
 
@@ -268,9 +263,72 @@ function updateConnectedLines(canvas, movedObj) {
   });
 }
 
+function fitCanvasToContent(canvas) {
+  const objects = canvas.getObjects().filter((obj) => obj.visible !== false);
+  if (!objects.length) {
+    canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+    canvas.requestRenderAll();
+    return;
+  }
+
+  const bounds = objects.reduce(
+    (acc, obj) => {
+      const rect = obj.getBoundingRect(true, true);
+      return {
+        left: Math.min(acc.left, rect.left),
+        top: Math.min(acc.top, rect.top),
+        right: Math.max(acc.right, rect.left + rect.width),
+        bottom: Math.max(acc.bottom, rect.top + rect.height),
+      };
+    },
+    { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity }
+  );
+
+  const contentWidth = Math.max(1, bounds.right - bounds.left);
+  const contentHeight = Math.max(1, bounds.bottom - bounds.top);
+  const scale = Math.min(
+    (canvas.getWidth() - 64) / contentWidth,
+    (canvas.getHeight() - 64) / contentHeight,
+    1
+  );
+
+  canvas.setViewportTransform([
+    scale,
+    0,
+    0,
+    scale,
+    (canvas.getWidth() - contentWidth * scale) / 2 - bounds.left * scale,
+    (canvas.getHeight() - contentHeight * scale) / 2 - bounds.top * scale,
+  ]);
+  canvas.requestRenderAll();
+}
+
+function normalizeSerializableObject(obj) {
+  if (!obj) return;
+
+  if (obj.type === "text" || obj.type === "i-text" || obj.type === "textbox") {
+    if (!obj.styles || typeof obj.styles !== "object") {
+      obj.styles = {};
+    }
+  }
+
+  if (typeof obj.getObjects === "function") {
+    obj.getObjects().forEach(normalizeSerializableObject);
+  }
+}
+
+function safeCanvasToJSON(canvas) {
+  if (!canvas) return null;
+
+  canvas.getObjects().forEach(normalizeSerializableObject);
+  return canvas.toJSON();
+}
+
 // ─── MAIN EDITOR PAGE ─────────────────────────────────────────────────────────
 export default function EditorPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const utils = trpc.useUtils();
   const [objectImage, setObjectImage] = useState(null);
   const [text, setText] = useState("");
   const [currentSelectedElements, setCurrentSelectedElements] = useState(null);
@@ -279,6 +337,13 @@ export default function EditorPage() {
   const [activeTab, setActiveTab] = useState("tools"); // "tools" | "diagrams"
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [autoSaveStatus, setAutoSaveStatus] = useState("idle"); // "idle" | "saving" | "saved"
+  const [shareOpen, setShareOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
+  const [shareCanvasId, setShareCanvasId] = useState(null);
+  const [loadedCanvasMeta, setLoadedCanvasMeta] = useState(null);
+  const [sharePrivateCanvasId, setSharePrivateCanvasId] = useState(null);
   const containerRef = useRef(null);
   const { editor, onReady } = useFabricJSEditor();
   const {
@@ -301,9 +366,115 @@ export default function EditorPage() {
   const exportMenuRef    = useRef(null);  // export dropdown container
   const tempLineRef      = useRef(null);  // in-progress line (click-to-click mode)
   const autoSaveTimerRef = useRef(null);  // auto-save debounce timer
+  const autoPersistTimerRef = useRef(null);
+  const initialHydrationDoneRef = useRef(false);
+  const savedCanvasRef = useRef({ id: null, meta: null });
+  const latestPersistPayloadRef = useRef(null);
+  const persistQueuedRef = useRef(false);
 
   // ── Ref bag updated every render – lets keyboard effect avoid stale closures
   const liveRef = useRef({});
+  savedCanvasRef.current = { id: shareCanvasId, meta: loadedCanvasMeta };
+
+  const persistCanvasMutation = trpc.canvas.save.useMutation({
+    onSuccess: (saved) => {
+      setShareCanvasId(saved.id);
+      setLoadedCanvasMeta((prev) => ({
+        title: saved.title ?? prev?.title ?? '',
+        description: saved.description ?? prev?.description ?? '',
+        isPublic: !!saved.isPublic,
+      }));
+      utils.canvas.myList.invalidate();
+      utils.canvas.byId.invalidate({ id: saved.id });
+      if (saved.isPublic) {
+        utils.canvas.publicList.invalidate();
+        utils.canvas.feed.invalidate();
+      }
+      if (user?.username) {
+        utils.user.byUsername.invalidate({ username: user.username });
+      }
+    },
+    onSettled: () => {
+      if (!persistQueuedRef.current || !latestPersistPayloadRef.current) return;
+      persistQueuedRef.current = false;
+      persistCanvasMutation.mutate(latestPersistPayloadRef.current);
+    },
+  });
+
+  const queuePersistCanvas = useCallback(() => {
+    const currentCanvas = canvasRef.current;
+    const savedCanvas = savedCanvasRef.current;
+    if (!currentCanvas || !savedCanvas.id || !savedCanvas.meta) {
+      setAutoSaveStatus("saved");
+      setTimeout(() => setAutoSaveStatus("idle"), 2500);
+      return;
+    }
+
+    let thumbnail;
+    try {
+      thumbnail = currentCanvas.toDataURL({ format: "png", multiplier: 0.5 });
+    } catch (_) {
+      thumbnail = undefined;
+    }
+
+    latestPersistPayloadRef.current = {
+      id: savedCanvas.id,
+      title: savedCanvas.meta.title ?? "Untitled",
+      description: savedCanvas.meta.description ?? undefined,
+      data: JSON.stringify(safeCanvasToJSON(currentCanvas)),
+      thumbnail,
+      isPublic: !!savedCanvas.meta.isPublic,
+      revisionNote: "Auto-save",
+    };
+
+    if (persistCanvasMutation.isPending) {
+      persistQueuedRef.current = true;
+      return;
+    }
+
+    persistCanvasMutation.mutate(latestPersistPayloadRef.current, {
+      onSettled: () => {
+        setAutoSaveStatus("saved");
+        setTimeout(() => setAutoSaveStatus("idle"), 2500);
+      },
+    });
+  }, [persistCanvasMutation]);
+
+  const applyLoadedCanvas = useCallback((payload) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !payload?.data) return false;
+
+    setShareCanvasId(payload.id || null);
+    setLoadedCanvasMeta(payload.meta ?? null);
+
+    try {
+      const parsed = JSON.parse(payload.data);
+      isLoadingHistory.current = true;
+      historyRef.current = { undo: [], redo: [] };
+      setHistoryState({ undoLen: 0, redoLen: 0 });
+      if (containerRef.current) {
+        canvas.setWidth(containerRef.current.clientWidth);
+        canvas.setHeight(containerRef.current.clientHeight);
+      }
+      canvas.discardActiveObject();
+      canvas.clear();
+      canvas.set("backgroundColor", "#1e2128");
+      canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+      canvas.loadFromJSON(parsed, () => {
+        fitCanvasToContent(canvas);
+        canvas.calcOffset();
+        canvas.renderAll();
+        localStorage.setItem("pixora-canvas", JSON.stringify(safeCanvasToJSON(canvas)));
+        isLoadingHistory.current = false;
+        setAutoSaveStatus("saved");
+        setTimeout(() => setAutoSaveStatus("idle"), 1200);
+      });
+      return true;
+    } catch (_) {
+      isLoadingHistory.current = false;
+      return false;
+    }
+  }, []);
   // ── Canvas resize ───────────────────────────────────────────────
   const resizeCanvas = useCallback(() => {
     if (editor && containerRef.current) {
@@ -328,17 +499,21 @@ export default function EditorPage() {
   // saveSnapshot uses canvasRef so it stays valid even before `editor` settles
   const saveSnapshot = useCallback(() => {
     if (!canvasRef.current || isLoadingHistory.current) return;
-    const snap = JSON.stringify(canvasRef.current.toJSON());
-    historyRef.current.undo.push(snap);
-    historyRef.current.redo = [];
-    setHistoryState({ undoLen: historyRef.current.undo.length, redoLen: 0 });
+    try {
+      const snap = JSON.stringify(safeCanvasToJSON(canvasRef.current));
+      historyRef.current.undo.push(snap);
+      historyRef.current.redo = [];
+      setHistoryState({ undoLen: historyRef.current.undo.length, redoLen: 0 });
+    } catch (error) {
+      console.error("Failed to save canvas snapshot:", error);
+    }
   }, []);
 
   function undo() {
     const canvas = canvasRef.current;
     if (!canvas || historyRef.current.undo.length === 0) return;
     isLoadingHistory.current = true;
-    const current = JSON.stringify(canvas.toJSON());
+    const current = JSON.stringify(safeCanvasToJSON(canvas));
     const prev = historyRef.current.undo.pop();
     historyRef.current.redo.unshift(current);
     canvas.loadFromJSON(prev, () => {
@@ -355,7 +530,7 @@ export default function EditorPage() {
     const canvas = canvasRef.current;
     if (!canvas || historyRef.current.redo.length === 0) return;
     isLoadingHistory.current = true;
-    const current = JSON.stringify(canvas.toJSON());
+    const current = JSON.stringify(safeCanvasToJSON(canvas));
     const next = historyRef.current.redo.shift();
     historyRef.current.undo.push(current);
     canvas.loadFromJSON(next, () => {
@@ -424,34 +599,54 @@ export default function EditorPage() {
     const scheduleAutoSave = () => {
       if (isLoadingHistory.current) return;
       clearTimeout(autoSaveTimerRef.current);
+      clearTimeout(autoPersistTimerRef.current);
       setAutoSaveStatus("saving");
       autoSaveTimerRef.current = setTimeout(() => {
         if (canvasRef.current) {
           try {
-            localStorage.setItem("pixora-canvas", JSON.stringify(canvasRef.current.toJSON()));
+            localStorage.setItem("pixora-canvas", JSON.stringify(safeCanvasToJSON(canvasRef.current)));
           } catch (_) {}
-          setAutoSaveStatus("saved");
-          setTimeout(() => setAutoSaveStatus("idle"), 2500);
         }
       }, 1200);
+
+      autoPersistTimerRef.current = setTimeout(() => {
+        queuePersistCanvas();
+      }, 1800);
     };
     canvas.on("object:modified", scheduleAutoSave);
     canvas.on("object:added",    scheduleAutoSave);
     canvas.on("object:removed",  scheduleAutoSave);
 
-    // ── Restore canvas from previous session ──────────────────────
-    const savedJSON = localStorage.getItem("artboard-canvas");
-    if (savedJSON) {
-      try {
-        const parsed = JSON.parse(savedJSON);
-        isLoadingHistory.current = true;
-        canvas.loadFromJSON(parsed, () => {
-          canvas.renderAll();
-          isLoadingHistory.current = false;
-        });
-      } catch (_) { /* ignore corrupted data */ }
-    }
   };
+
+  useEffect(() => {
+    if (!isEditorReady) return;
+
+    const hydrateEditor = () => {
+      const pending = consumePendingEditorCanvasLoad();
+      if (pending?.data) {
+        applyLoadedCanvas(pending);
+        initialHydrationDoneRef.current = true;
+        return;
+      }
+
+      if (!initialHydrationDoneRef.current) {
+        const fallbackJSON = localStorage.getItem("pixora-canvas") ||
+                             localStorage.getItem("artboard-canvas");
+        if (fallbackJSON) {
+          applyLoadedCanvas({ data: fallbackJSON, id: null, meta: null });
+        } else {
+          setShareCanvasId(null);
+          setLoadedCanvasMeta(null);
+        }
+        initialHydrationDoneRef.current = true;
+      }
+    };
+
+    window.addEventListener(EDITOR_LOAD_EVENT, hydrateEditor);
+    requestAnimationFrame(() => requestAnimationFrame(hydrateEditor));
+    return () => window.removeEventListener(EDITOR_LOAD_EVENT, hydrateEditor);
+  }, [applyLoadedCanvas, isEditorReady]);
 
   // ── Layer order ─────────────────────────────────────────────────
   function bringForward() {
@@ -857,7 +1052,7 @@ export default function EditorPage() {
   // ── JSON Export / Import ─────────────────────────────────────────────────
   function exportJSON() {
     if (!canvasRef.current) return;
-    const json = JSON.stringify(canvasRef.current.toJSON(), null, 2);
+    const json = JSON.stringify(safeCanvasToJSON(canvasRef.current), null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement("a");
@@ -1051,54 +1246,117 @@ export default function EditorPage() {
     return () => document.removeEventListener("mousedown", handleOutside);
   }, [showExportMenu]);
 
+  const currentCanvasTitle = loadedCanvasMeta?.title?.trim()
+    || (shareCanvasId ? "Untitled canvas" : "Unsaved canvas");
+  const isSavedCanvas = !!shareCanvasId;
+  const canvasStateLabel = isSavedCanvas ? "Saved canvas" : "New canvas";
+
   return (
     <div className="flex flex-col h-screen bg-[#0f1117] text-white overflow-hidden">
       {/* ── Top bar ──────────────────────────────────────────────── */}
-      <header className="flex items-center justify-between px-4 h-12 bg-[#16181e] border-b border-white/[0.07] shrink-0 z-10">
-        <div className="flex items-center gap-3">
+      <header className="flex items-center justify-between px-3 md:px-4 h-12 bg-[#16181e] border-b border-white/[0.07] shrink-0 z-10">
+        <div className="flex items-center gap-2 md:gap-3 min-w-0">
           <button
             title="Toggle tools sidebar"
             onClick={() => setSidebarOpen((v) => !v)}
-            className="sm:hidden flex items-center justify-center w-7 h-7 text-white/40 hover:text-white transition-colors"
+            className="md:hidden flex items-center justify-center w-7 h-7 text-white/40 hover:text-white transition-colors"
           >
             <MdMenu size={18} />
           </button>
-          <button
-            onClick={() => navigate("/")}
+          <Link
+            to="/"
             className="flex items-center gap-1.5 text-white/50 hover:text-white transition-colors text-sm"
             title="Back to home"
           >
             <BsArrowLeft size={14} />
-            <span className="hidden sm:inline">Home</span>
-          </button>
+            <span className="hidden md:inline">Home</span>
+          </Link>
           <div className="w-px h-4 bg-white/10" />
-          <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => navigate('/')}
+            className="flex items-center gap-1.5 hover:opacity-85 transition-opacity min-w-0"
+            title="Pixora home"
+          >
             <div className="w-5 h-5 rounded bg-indigo-500 flex items-center justify-center">
               <BsPencilFill size={10} />
             </div>
-            <span className="font-semibold text-sm tracking-tight">Pixora</span>
+            <span className="font-semibold text-sm tracking-tight truncate">Pixora</span>
+          </button>
+          <div className="hidden md:flex items-center gap-2 pl-1">
+            <Link to="/gallery" className="text-xs text-white/40 hover:text-white/75 transition-colors">
+              Gallery
+            </Link>
+            {user && (
+              <Link to="/feed" className="text-xs text-white/40 hover:text-white/75 transition-colors">
+                Feed
+              </Link>
+            )}
+            {user && (
+              <Link to="/my-canvases" className="text-xs text-white/40 hover:text-white/75 transition-colors">
+                My Canvases
+              </Link>
+            )}
+            {user?.username && (
+              <Link to={`/u/${user.username}`} className="text-xs text-white/40 hover:text-white/75 transition-colors">
+                Profile
+              </Link>
+            )}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 md:gap-2 shrink-0">
           <ToolBtn title="Undo (Ctrl+Z)" onClick={undo} disabled={historyState.undoLen === 0}>
             <MdUndo />
           </ToolBtn>
           <ToolBtn title="Redo (Ctrl+Y)" onClick={redo} disabled={historyState.redoLen === 0}>
             <MdRedo />
           </ToolBtn>
-          <div className="hidden sm:block w-px h-4 bg-white/10 mx-1" />
-          <div className="hidden sm:flex">
+          <button
+            title="More actions"
+            onClick={() => setMobileActionsOpen(true)}
+            className="md:hidden flex items-center justify-center w-9 h-9 rounded-lg border border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white transition-colors"
+          >
+            <BsThreeDotsVertical size={16} />
+          </button>
+          <div className="hidden md:block w-px h-4 bg-white/10 mx-1" />
+          <div className="hidden md:flex">
             <ToolBtn title="Delete all" onClick={() => onDeleteAll(editor, setText)}>
               <FaBackspace />
             </ToolBtn>
           </div>
+          {/* History */}
+          {shareCanvasId && (
+            <button
+              title="Version history"
+              onClick={() => setHistoryOpen((o) => !o)}
+              className={`hidden md:flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors border ${
+                historyOpen
+                  ? 'bg-indigo-500/20 border-indigo-500/30 text-indigo-300'
+                  : 'bg-white/5 hover:bg-white/10 border-white/10 text-white/60 hover:text-white'
+              }`}
+            >
+              <BsClockHistory size={12} />
+              <span className="hidden md:inline">History</span>
+            </button>
+          )}
+          {/* Share */}
+          <button
+            title="Save / Share canvas"
+            onClick={() => {
+              if (!user) { setAuthOpen(true); }
+              else { setShareOpen(true); }
+            }}
+            className="hidden md:flex items-center gap-1.5 bg-violet-500/15 hover:bg-violet-500/25 border border-violet-500/25 text-violet-300 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+          >
+            <BsShare size={12} />
+            <span className="hidden md:inline">Save</span>
+          </button>
           {/* JSON import */}
           <label
             title="Import canvas from JSON"
-            className="flex items-center gap-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/60 hover:text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors cursor-pointer"
+            className="hidden md:flex items-center gap-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/60 hover:text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors cursor-pointer"
           >
             <MdFileUpload size={14} />
-            <span className="hidden sm:inline">Import</span>
+            <span className="hidden md:inline">Import</span>
             <input
               type="file"
               accept=".json,application/json"
@@ -1109,13 +1367,13 @@ export default function EditorPage() {
             />
           </label>
           {/* Export dropdown */}
-          <div className="relative" ref={exportMenuRef}>
+          <div className="relative hidden md:block" ref={exportMenuRef}>
             <button
               onClick={() => setShowExportMenu((v) => !v)}
               className="flex items-center gap-1.5 bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
             >
               <GoDesktopDownload size={14} />
-              <span className="hidden sm:inline">Export</span>
+              <span className="hidden md:inline">Export</span>
               <TbChevronDown size={12} />
             </button>
             {showExportMenu && (
@@ -1152,15 +1410,15 @@ export default function EditorPage() {
         {/* Mobile backdrop — tap to close sidebar */}
         {sidebarOpen && (
           <div
-            className="sm:hidden absolute inset-0 z-20 bg-black/40"
+            className="md:hidden absolute inset-0 z-20 bg-black/40"
             onClick={() => setSidebarOpen(false)}
           />
         )}
         {/* ── Left sidebar ─────────────────────────────────────── */}
         <aside className={`shrink-0 bg-[#16181e] border-r border-white/[0.07] flex-col items-center py-3 gap-1 overflow-y-auto ${
           sidebarOpen
-            ? "flex w-14 absolute inset-y-0 left-0 z-30 shadow-xl sm:relative sm:shadow-none"
-            : "hidden sm:flex sm:w-14"
+            ? "flex w-14 absolute inset-y-0 left-0 z-30 shadow-xl md:relative md:shadow-none"
+            : "hidden md:flex md:w-14"
         }`}>
           {/* Tab toggle */}
           <button
@@ -1255,23 +1513,55 @@ export default function EditorPage() {
             className="w-full h-full"
             onReady={_onReady}
           />
+          <div className="absolute top-3 right-3 z-20 max-w-[min(72vw,320px)] rounded-2xl border border-white/[0.08] bg-[#16181e]/92 backdrop-blur-xl shadow-xl px-3 py-2">
+            <div className="flex items-start gap-2 min-w-0">
+              <span
+                className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                  isSavedCanvas
+                    ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/20'
+                    : 'bg-amber-500/15 text-amber-300 border border-amber-500/20'
+                }`}
+              >
+                {isSavedCanvas ? 'Saved' : 'New'}
+              </span>
+              <div className="min-w-0">
+                <p className="truncate text-xs font-medium text-white/80" title={currentCanvasTitle}>
+                  {currentCanvasTitle}
+                </p>
+                <p className="text-[11px] text-white/35">
+                  {autoSaveStatus === "saving"
+                    ? "Saving..."
+                    : autoSaveStatus === "saved"
+                    ? "Saved"
+                    : canvasStateLabel}
+                </p>
+              </div>
+            </div>
+          </div>
           {/* color swatch + inline picker — wraps both so click-outside works */}
-          <div ref={colorPickerRef} className="absolute bottom-4 left-4 z-20 flex flex-col items-start gap-2">
-            <div className="flex items-center gap-2">
+          <div ref={colorPickerRef} className="absolute bottom-4 left-3 md:left-4 z-20 flex flex-col items-start gap-2 max-w-[calc(100vw-7rem)] md:max-w-none">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() => setShowColorPicker((v) => !v)}
                 className="w-7 h-7 rounded-full border-2 border-white/20 shadow-md hover:scale-110 transition-transform"
                 style={{ background: color?.hex ?? color }}
                 title="Active stroke / fill color — click to open picker"
               />
-              <span className="text-xs text-white/30 font-mono">{color?.hex ?? color}</span>
+              <button
+                type="button"
+                onClick={() => setShowColorPicker((v) => !v)}
+                className="text-xs text-white/30 font-mono hover:text-white/70 transition-colors"
+                title="Open color picker"
+              >
+                {color?.hex ?? color}
+              </button>
             </div>
             {showColorPicker && (
-              <div className="shadow-2xl rounded-xl overflow-hidden" style={{ width: 300 }}>
+              <div className="shadow-2xl rounded-xl overflow-hidden max-w-[calc(100vw-2rem)]" style={{ width: 300 }}>
                 <ColorPicker
                   color={color?.hex ?? color}
                   onChange={(c) => setColor(c)}
-                  style={{ width: "300px" }}
+                  style={{ width: "min(300px, calc(100vw - 2rem))" }}
                 />
               </div>
             )}
@@ -1279,9 +1569,118 @@ export default function EditorPage() {
         </main>
       </div>
 
+      {mobileActionsOpen && (
+        <div className="md:hidden fixed inset-0 z-40" onClick={() => setMobileActionsOpen(false)}>
+          <div className="absolute inset-0 bg-black/45 backdrop-blur-sm" />
+          <div
+            className="absolute inset-y-0 right-0 w-[min(84vw,320px)] bg-[#16181e] border-l border-white/[0.08] shadow-2xl p-4 flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-5">
+              <div>
+                <p className="text-sm font-semibold">Canvas actions</p>
+                <p className="text-[11px] text-white/35 truncate">{currentCanvasTitle}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileActionsOpen(false)}
+                className="w-8 h-8 rounded-lg border border-white/10 bg-white/5 text-white/50 hover:text-white hover:bg-white/10 transition-colors"
+              >
+                <BsX size={16} className="mx-auto" />
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              {shareCanvasId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileActionsOpen(false);
+                    setHistoryOpen(true);
+                  }}
+                  className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] text-sm text-white/75 hover:bg-white/[0.06] transition-colors"
+                >
+                  <BsClockHistory size={14} />
+                  Version history
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileActionsOpen(false);
+                  if (!user) setAuthOpen(true);
+                  else setShareOpen(true);
+                }}
+                className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-violet-500/15 border border-violet-500/25 text-sm text-violet-300 hover:bg-violet-500/25 transition-colors"
+              >
+                <BsShare size={14} />
+                Save or publish
+              </button>
+              <label className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] text-sm text-white/75 hover:bg-white/[0.06] transition-colors cursor-pointer">
+                <MdFileUpload size={14} />
+                Import JSON
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files?.[0]) {
+                      importJSON(e.target.files[0]);
+                      e.target.value = "";
+                    }
+                    setMobileActionsOpen(false);
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  download();
+                  setMobileActionsOpen(false);
+                }}
+                className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] text-sm text-white/75 hover:bg-white/[0.06] transition-colors"
+              >
+                <GoDesktopDownload size={14} />
+                Export PNG
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  exportJSON();
+                  setMobileActionsOpen(false);
+                }}
+                className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] text-sm text-white/75 hover:bg-white/[0.06] transition-colors"
+              >
+                <MdFileDownload size={14} />
+                Export JSON
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onDeleteAll(editor, setText);
+                  setMobileActionsOpen(false);
+                }}
+                className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] text-sm text-white/75 hover:bg-white/[0.06] transition-colors"
+              >
+                <FaBackspace size={14} />
+                Delete all
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Status bar ───────────────────────────────────────────── */}
-      <footer className="h-7 px-4 bg-[#16181e] border-t border-white/[0.07] flex items-center gap-4 text-[11px] text-white/25 shrink-0">
-        <span>{activeTab === "diagrams" ? "Diagram mode" : "Canvas mode"}</span>
+      <footer className="min-h-7 px-3 md:px-4 py-1.5 bg-[#16181e] border-t border-white/[0.07] flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-white/25 shrink-0">
+        <span className="md:hidden">{activeTab === "diagrams" ? "Diagram mode" : "Canvas mode"}</span>
+        <span className={`md:hidden ${isSavedCanvas ? "text-emerald-400/60" : "text-amber-400/70"}`}>
+          {canvasStateLabel}
+        </span>
+        <span className="hidden md:block truncate max-w-[180px] md:max-w-none">{currentCanvasTitle}</span>
+        <span className="hidden md:block">{activeTab === "diagrams" ? "Diagram mode" : "Canvas mode"}</span>
+        <span className={`hidden md:block ${isSavedCanvas ? "text-emerald-400/60" : "text-amber-400/70"}`}>
+          {canvasStateLabel}
+        </span>
         {drawing && <span className="text-indigo-400">● Drawing</span>}
         {lineMaking && <span className="text-violet-400">● Line tool</span>}
         {!!currentSelectedElements?.length && (
@@ -1289,7 +1688,9 @@ export default function EditorPage() {
         )}
         {autoSaveStatus === "saving" && <span className="text-white/30">● saving…</span>}
         {autoSaveStatus === "saved"  && <span className="text-green-400/60">✓ saved</span>}
-        <span className="ml-auto hidden sm:block">Ctrl+Z/Y undo/redo · Ctrl+C/V copy/paste · Ctrl+D dup · Ctrl+G group · Ctrl+A all · Del delete · B brush · L line · Esc exit · ↑↓←→ nudge</span>
+        <span className="hidden md:block">Made by Okba Allaoua</span>
+        <span className="md:hidden text-white/20">Pixora</span>
+        <span className="hidden lg:block lg:ml-auto">Ctrl+Z/Y undo/redo · Ctrl+C/V copy/paste · Ctrl+D dup · Ctrl+G group · Ctrl+A all · Del delete · B brush · L line · Esc exit · ↑↓←→ nudge</span>
       </footer>
 
       {/* ── Modal ────────────────────────────────────────────────── */}
@@ -1303,6 +1704,10 @@ export default function EditorPage() {
         }}
         title={modalOptions[selectedModal]?.title ?? ""}
         centered
+        closeOnClickOutside
+        closeOnEscape
+        lockScroll
+        overlayProps={{ backgroundOpacity: 0.65, blur: 4 }}
         classNames={{
           content: modalClasses?.content,
           title: modalClasses?.title,
@@ -1311,6 +1716,57 @@ export default function EditorPage() {
       >
         {modalOptions[selectedModal]?.children}
       </Modal>
+      <ShareModal
+        opened={shareOpen}
+        onClose={() => setShareOpen(false)}
+        existingId={shareCanvasId}
+        initialTitle={loadedCanvasMeta?.title ?? ''}
+        initialDescription={loadedCanvasMeta?.description ?? ''}
+        initialVisibility={loadedCanvasMeta?.isPublic ?? false}
+        onSaved={(canvas) => {
+          setShareCanvasId(canvas.id);
+          setLoadedCanvasMeta({
+            title: canvas.title ?? '',
+            description: canvas.description ?? '',
+            isPublic: !!canvas.isPublic,
+          });
+        }}
+        getCanvasData={() => {
+          if (!editor?.canvas) return { json: '{}', thumbnail: null };
+          const json = JSON.stringify(safeCanvasToJSON(editor.canvas));
+          const thumbnail = editor.canvas.toDataURL({ format: 'png', multiplier: 0.5 });
+          return { json, thumbnail };
+        }}
+        onSharePrivate={(canvasId) => setSharePrivateCanvasId(canvasId)}
+      />
+      <SharePrivateModal
+        opened={!!sharePrivateCanvasId}
+        onClose={() => setSharePrivateCanvasId(null)}
+        canvasId={sharePrivateCanvasId}
+      />
+      <AuthModal opened={authOpen} onClose={() => setAuthOpen(false)} />
+      {historyOpen && shareCanvasId && (
+        <div
+          className="fixed inset-0 z-40 flex justify-end bg-black/45 backdrop-blur-sm"
+          onClick={() => setHistoryOpen(false)}
+        >
+          <div className="flex h-full shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <HistoryPanel
+              canvasId={shareCanvasId}
+              ownerUsername={user?.username ?? undefined}
+              onClose={() => setHistoryOpen(false)}
+              onRestore={(data) => {
+                if (editor?.canvas) {
+                  editor.canvas.loadFromJSON(JSON.parse(data), () => {
+                    editor.canvas.renderAll();
+                  });
+                }
+                setHistoryOpen(false);
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

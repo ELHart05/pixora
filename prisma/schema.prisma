@@ -1,0 +1,102 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  email     String?   @unique
+  name      String?
+  username  String?   @unique
+  bio       String?
+  avatar    String?
+  githubId  String?   @unique
+  googleId  String?   @unique
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  canvases      Canvas[]
+  likes         Like[]
+  comments      Comment[]
+  sharedCanvases CanvasShare[]
+  following     Follow[]  @relation("UserFollowing")
+  followers     Follow[]  @relation("UserFollowers")
+}
+
+model Canvas {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  title       String    @default("Untitled")
+  description String?
+  data        String    // Fabric.js JSON string
+  thumbnail   String?   // ImageBB URL
+  isPublic    Boolean   @default(false)
+  userId      String    @db.ObjectId
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  likes     Like[]
+  comments  Comment[]
+  shares    CanvasShare[]
+  revisions CanvasRevision[]
+}
+
+model Like {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  canvasId  String   @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  canvas    Canvas   @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, canvasId])
+}
+
+model Comment {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  text      String
+  userId    String   @db.ObjectId
+  canvasId  String   @db.ObjectId
+  parentId  String?  @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  canvas    Canvas   @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Private canvas sharing — a canvas owner can grant access to specific users
+model CanvasShare {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  canvasId  String   @db.ObjectId
+  userId    String   @db.ObjectId
+  canvas    Canvas   @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([canvasId, userId])
+}
+
+// Snapshot revision saved on every canvas.save mutation
+model CanvasRevision {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  canvasId  String   @db.ObjectId
+  canvas    Canvas   @relation(fields: [canvasId], references: [id], onDelete: Cascade)
+  data      String   // Fabric.js JSON at this point in time
+  note      String?  // e.g. "Auto-save" or user-provided label
+  createdAt DateTime @default(now())
+}
+
+model Follow {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  followerId  String   @db.ObjectId
+  followingId String   @db.ObjectId
+  follower    User     @relation("UserFollowing", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User     @relation("UserFollowers", fields: [followingId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])
+}

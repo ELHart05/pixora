@@ -1,16 +1,27 @@
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import {
-  BsPencilFill,
   BsFillImageFill,
   BsArrowRight,
-  BsGithub,
   BsVectorPen,
   BsBoundingBox,
+  BsPersonCircle,
+  BsGridFill,
+  BsHeart,
+  BsChatLeft,
+  BsTrophyFill,
+  BsClockHistory,
+  BsGlobe2,
+  BsLockFill,
 } from 'react-icons/bs';
 import { BiRectangle } from 'react-icons/bi';
 import { MdOutlineColorLens } from 'react-icons/md';
 import { GoDesktopDownload } from 'react-icons/go';
 import { TbLayersIntersect, TbVectorBezier2, TbShape, TbDatabase } from 'react-icons/tb';
+import { trpc } from '../lib/trpc';
+import { SiteFooter, SiteNavbar } from '../components/SiteChrome';
+import { CanvasDataPreview } from '../components/CanvasDataPreview';
+import { useAuth } from '../context/AuthContext';
+import { stageEditorCanvasLoad } from '../lib/editorLoad';
 
 const FEATURES = [
   {
@@ -89,9 +100,28 @@ const SHORTCUTS = [
 
 export default function LandingPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+
+  const { data: galleryData } = trpc.canvas.publicList.useQuery({ page: 1, limit: 6 });
+  const { data: topCreators } = trpc.user.topCreators.useQuery();
+  const myCanvases = trpc.canvas.myList.useQuery(undefined, { enabled: !!user });
+
+  const RANK_COLORS = ['text-amber-400', 'text-slate-300', 'text-amber-600', 'text-white/40', 'text-white/40'];
+  const recentCanvases = (myCanvases.data ?? []).slice(0, 3);
+
+  function continueCanvas(canvas) {
+    stageEditorCanvasLoad({
+      data: canvas.data ?? '{}',
+      id: canvas.id,
+      title: canvas.title ?? '',
+      description: canvas.description ?? '',
+      isPublic: !!canvas.isPublic,
+    });
+    navigate('/editor');
+  }
 
   return (
-    <div className="min-h-screen bg-[#07090e] text-white font-sans overflow-x-hidden">
+    <div className="min-h-screen bg-[#07090e] text-white font-sans overflow-x-hidden flex flex-col">
 
       {/* ── Animated ambient background ─────────────────────── */}
       <div className="fixed inset-0 -z-10 overflow-hidden pointer-events-none">
@@ -101,55 +131,28 @@ export default function LandingPage() {
         <div className="absolute inset-0 bg-[radial-gradient(rgba(255,255,255,0.035)_1px,transparent_0)] [background-size:30px_30px]" />
       </div>
 
-      {/* ── Navbar ───────────────────────────────────────────────── */}
-      <nav className="fixed top-0 inset-x-0 z-50 bg-[#07090e]/80 backdrop-blur-xl border-b border-white/[0.05]">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 shrink-0 min-w-0">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/30 shrink-0">
-              <BsPencilFill size={13} />
-            </div>
-            <span className="font-bold tracking-tight truncate">Pixora</span>
-          </div>
-          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            <a href="https://github.com/ELHart05/pixora" target="_blank" rel="noopener noreferrer"
-              className="text-white/35 hover:text-white transition-colors p-1" aria-label="GitHub">
-              <BsGithub size={17} />
-            </a>
-            <button
-              onClick={() => navigate('/editor')}
-              className="flex items-center gap-1.5 bg-gradient-to-r from-indigo-500 to-violet-500 hover:from-indigo-400 hover:to-violet-400 text-white text-xs sm:text-sm font-semibold px-3 sm:px-4 py-1.5 rounded-lg transition-all shadow-md shadow-indigo-900/40 whitespace-nowrap"
-            >
-              Open editor <BsArrowRight size={12} />
-            </button>
-          </div>
-        </div>
-      </nav>
+      <SiteNavbar />
 
       {/* ── Hero ─────────────────────────────────────────────────── */}
       <section className="relative pt-28 sm:pt-36 pb-16 sm:pb-24 px-4 sm:px-6">
         <div className="absolute inset-x-0 top-0 h-[520px] bg-[radial-gradient(ellipse_80%_50%_at_50%_-5%,rgba(99,102,241,0.18),transparent)] pointer-events-none" />
 
         <div className="max-w-6xl mx-auto">
-          {/* Badge */}
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-medium mb-7">
-            <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-            Free to use · No sign-up needed
-          </div>
 
           <div className="grid lg:grid-cols-2 gap-10 lg:gap-14 items-center">
             {/* Left: copy */}
             <div>
-              <h1 className="text-4xl sm:text-5xl lg:text-6xl font-black leading-[1.1] tracking-tight mb-5">
-                Sketch ideas.<br />
-                <span className="gradient-text">Make them clear.</span>
+              <h1 className="text-4xl sm:text-5xl lg:text-6xl font-black leading-[1.1] tracking-tight mb-5 animate-hero-text delay-100">
+                <span className="hero-color-wave">Sketch ideas.</span><br />
+                <span className="hero-color-wave hero-color-wave-alt">Make them clear.</span>
               </h1>
-              <p className="text-white/50 text-base sm:text-lg leading-relaxed mb-8 max-w-md">
+              <p className="text-white/50 text-base sm:text-lg leading-relaxed mb-8 max-w-md animate-hero-text delay-300">
                 A free canvas tool that runs in your browser. Add shapes, connect them
                 with arrows, annotate — then save or share when you're done.
               </p>
 
               {/* CTAs */}
-              <div className="flex flex-wrap gap-3 mb-9">
+              <div className="flex flex-wrap gap-3 mb-9 animate-hero-text delay-500">
                 <button
                   onClick={() => navigate('/editor')}
                   className="group flex items-center gap-2.5 bg-gradient-to-r from-indigo-500 to-violet-500 hover:from-indigo-400 hover:to-violet-400 text-white font-bold px-6 sm:px-7 py-3 sm:py-3.5 rounded-xl transition-all shadow-xl shadow-indigo-900/40 hover:-translate-y-0.5 text-sm sm:text-base"
@@ -177,6 +180,10 @@ export default function LandingPage() {
 
             {/* Right: canvas mockup — contained, no overflowing decorations */}
             <div className="relative mt-8 lg:mt-0">
+              <div className="pointer-events-none absolute -top-8 right-8 h-9 w-9 rounded-full border border-indigo-300/40 bg-indigo-400/10 animate-float-quiet" />
+              <div className="pointer-events-none absolute top-7 -left-7 h-8 w-8 border border-violet-300/35 bg-violet-400/10 rotate-12 animate-float-quiet-slow" />
+              <div className="pointer-events-none absolute -bottom-7 right-10 h-10 w-10 border border-fuchsia-300/30 bg-fuchsia-400/10 rotate-45 animate-float-quiet" style={{ animationDelay: '-2.4s' }} />
+              <div className="pointer-events-none absolute bottom-8 -left-8 h-5 w-5 rounded-full border border-cyan-300/30 bg-cyan-400/10 animate-float-quiet-slow" style={{ animationDelay: '-3.2s' }} />
               <div className="absolute -inset-4 sm:-inset-6 bg-gradient-to-r from-indigo-600/10 via-violet-600/10 to-fuchsia-600/8 rounded-3xl blur-2xl animate-glow" />
               <div className="relative rounded-2xl border border-white/[0.09] overflow-hidden shadow-2xl shadow-black/70 bg-[#0f1117]">
                 {/* Window chrome */}
@@ -224,6 +231,85 @@ export default function LandingPage() {
           </div>
         </div>
       </section>
+
+      {user && (
+        <section className="py-12 sm:py-14 px-4 sm:px-6 border-t border-white/[0.05]">
+          <div className="max-w-6xl mx-auto">
+            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
+              <div>
+                <p className="text-xs font-mono text-indigo-400 uppercase tracking-widest mb-3">Continue working</p>
+                <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">Pick up one of your canvases.</h2>
+                <p className="text-white/35 text-sm mt-2">Your most recently updated work is right here.</p>
+              </div>
+              <Link
+                to="/my-canvases"
+                className="inline-flex items-center gap-2 text-sm text-white/50 hover:text-white transition-colors font-medium"
+              >
+                See all canvases <BsArrowRight size={14} />
+              </Link>
+            </div>
+
+            {myCanvases.isLoading ? (
+              <div className="text-white/30 text-sm py-10">Loading your canvases…</div>
+            ) : recentCanvases.length === 0 ? (
+              <div className="rounded-2xl border border-white/[0.07] bg-white/[0.02] p-6 sm:p-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <p className="font-semibold text-white">No saved canvases yet</p>
+                  <p className="text-sm text-white/40 mt-1">Start a new canvas and it will show up here the next time you come back.</p>
+                </div>
+                <button
+                  onClick={() => navigate('/editor')}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-sm font-semibold transition-all self-start"
+                >
+                  Open editor <BsArrowRight size={14} />
+                </button>
+              </div>
+            ) : (
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {recentCanvases.map((canvas) => (
+                  <button
+                    key={canvas.id}
+                    type="button"
+                    onClick={() => continueCanvas(canvas)}
+                    className="text-left group bg-white/[0.025] border border-white/[0.07] rounded-2xl overflow-hidden hover:border-white/15 hover:shadow-lg hover:shadow-black/40 transition-all duration-200"
+                  >
+                    <div className="aspect-video bg-[#1a1d24] flex items-center justify-center overflow-hidden">
+                      {canvas.thumbnail ? (
+                        <img src={canvas.thumbnail} alt={canvas.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                      ) : canvas.data ? (
+                        <CanvasDataPreview data={canvas.data} title={canvas.title} />
+                      ) : (
+                        <BsGridFill size={28} className="text-white/10" />
+                      )}
+                    </div>
+                    <div className="p-4">
+                      <div className="flex items-center gap-2 text-[11px] text-white/30 mb-2">
+                        <span className="inline-flex items-center gap-1">
+                          <BsClockHistory size={11} />
+                          Continue editing
+                        </span>
+                        <span className="ml-auto inline-flex items-center gap-1">
+                          {canvas.isPublic ? <BsGlobe2 size={10} className="text-indigo-300/70" /> : <BsLockFill size={10} className="text-white/35" />}
+                          {canvas.isPublic ? 'Public' : 'Private'}
+                        </span>
+                      </div>
+                      <h3 className="font-semibold text-sm text-white truncate mb-1">{canvas.title}</h3>
+                      {canvas.description && (
+                        <p className="text-white/35 text-xs line-clamp-2 mb-3">{canvas.description}</p>
+                      )}
+                      <div className="flex items-center gap-3 text-white/30 text-xs">
+                        <span className="flex items-center gap-1"><BsHeart size={11} />{canvas._count?.likes ?? 0}</span>
+                        <span className="flex items-center gap-1"><BsChatLeft size={11} />{canvas._count?.comments ?? 0}</span>
+                        <span className="ml-auto text-white/25 group-hover:text-white/45 transition-colors">Open</span>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* ── Features ─────────────────────────────────────────────── */}
       <section id="features" className="py-16 sm:py-20 px-4 sm:px-6 border-t border-white/[0.05]">
@@ -303,6 +389,95 @@ export default function LandingPage() {
         </div>
       </section>
 
+      {/* ── Gallery Showcase ───────────────────────────────────────── */}
+      {galleryData?.items?.length > 0 && (
+        <section className="py-16 sm:py-20 px-4 sm:px-6 border-t border-white/[0.05]">
+          <div className="max-w-6xl mx-auto">
+            <div className="flex items-end justify-between mb-10">
+              <div>
+                <p className="text-xs font-mono text-fuchsia-400 uppercase tracking-widest mb-3">Community</p>
+                <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight">From the gallery</h2>
+                <p className="text-white/35 text-sm mt-2">See what others are creating with Pixora.</p>
+              </div>
+              <Link to="/gallery" className="hidden sm:flex items-center gap-2 text-sm text-white/50 hover:text-white transition-colors font-medium">
+                View all <BsArrowRight size={14} />
+              </Link>
+            </div>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {galleryData.items.slice(0, 6).map((canvas) => (
+                <Link key={canvas.id} to={`/p/${canvas.id}`} className="group bg-white/[0.025] border border-white/[0.07] rounded-2xl overflow-hidden hover:border-white/15 hover:shadow-lg hover:shadow-black/40 transition-all duration-200">
+                  <div className="aspect-video bg-[#1a1d24] flex items-center justify-center overflow-hidden">
+                    {canvas.thumbnail ? (
+                      <img src={canvas.thumbnail} alt={canvas.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                    ) : canvas.data ? (
+                      <CanvasDataPreview data={canvas.data} title={canvas.title} />
+                    ) : (
+                      <BsGridFill size={28} className="text-white/10" />
+                    )}
+                  </div>
+                  <div className="p-4">
+                    <h3 className="font-semibold text-sm text-white truncate mb-1">{canvas.title}</h3>
+                    <div className="flex items-center gap-3 text-white/30 text-xs">
+                      <span className="flex items-center gap-1"><BsHeart size={11} />{canvas._count?.likes ?? 0}</span>
+                      <span className="flex items-center gap-1"><BsChatLeft size={11} />{canvas._count?.comments ?? 0}</span>
+                      <span className="ml-auto">{canvas.user?.name ?? 'Unknown'}</span>
+                    </div>
+                  </div>
+                </Link>
+              ))}
+            </div>
+            <Link to="/gallery" className="sm:hidden flex items-center justify-center gap-2 mt-6 text-sm text-white/50 hover:text-white transition-colors font-medium">
+              View all <BsArrowRight size={14} />
+            </Link>
+          </div>
+        </section>
+      )}
+
+      {/* ── Top Creators ──────────────────────────────────────────── */}
+      {topCreators?.length > 0 && (
+        <section className="py-16 sm:py-20 px-4 sm:px-6 border-t border-white/[0.05]">
+          <div className="max-w-6xl mx-auto">
+          <div className="mb-10">
+              <div className="flex items-end justify-between gap-4">
+                <div>
+                  <p className="text-xs font-mono text-amber-400 uppercase tracking-widest mb-3">Leaderboard</p>
+                  <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight">Top creators</h2>
+                  <p className="text-white/35 text-sm mt-2">The most active members of the Pixora community.</p>
+                </div>
+                <Link to="/creators" className="hidden sm:flex items-center gap-2 text-sm text-white/50 hover:text-white transition-colors font-medium shrink-0">
+                  Browse all creators <BsArrowRight size={14} />
+                </Link>
+              </div>
+            </div>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+              {topCreators.map((creator, idx) => (
+                <Link
+                  key={creator.id}
+                  to={creator.username ? `/u/${creator.username}` : '#'}
+                  className="group relative p-5 rounded-2xl bg-white/[0.025] border border-white/[0.07] hover:border-white/15 hover:shadow-lg transition-all text-center"
+                >
+                  <div className={`absolute top-3 right-3 flex items-center gap-1 text-xs font-bold ${RANK_COLORS[idx] ?? 'text-white/40'}`}>
+                    {idx === 0 && <BsTrophyFill size={12} />}
+                    #{idx + 1}
+                  </div>
+                  {creator.avatar ? (
+                    <img src={creator.avatar} alt={creator.name} className="w-14 h-14 rounded-full mx-auto mb-3 border-2 border-white/10 object-cover" />
+                  ) : (
+                    <BsPersonCircle size={56} className="mx-auto mb-3 text-white/20" />
+                  )}
+                  <h3 className="font-semibold text-sm truncate">{creator.name}</h3>
+                  {creator.username && <p className="text-xs text-white/30 truncate">@{creator.username}</p>}
+                  <p className="text-xs text-indigo-300 mt-2 font-medium">{creator.canvasCount} {creator.canvasCount === 1 ? 'canvas' : 'canvases'}</p>
+                </Link>
+              ))}
+            </div>
+            <Link to="/creators" className="sm:hidden flex items-center justify-center gap-2 mt-6 text-sm text-white/50 hover:text-white transition-colors font-medium">
+              Browse all creators <BsArrowRight size={14} />
+            </Link>
+          </div>
+        </section>
+      )}
+
       {/* ── CTA ──────────────────────────────────────────────────── */}
       <section className="py-16 sm:py-24 px-4 sm:px-6 border-t border-white/[0.05]">
         <div className="max-w-6xl mx-auto">
@@ -329,25 +504,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ── Footer ───────────────────────────────────────────────── */}
-      <footer className="border-t border-white/[0.05] py-6 sm:py-8 px-4 sm:px-6">
-        <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center gap-4 sm:gap-0 sm:justify-between text-xs text-white/30">
-          <div className="flex items-center gap-2 shrink-0">
-            <div className="w-5 h-5 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center shrink-0">
-              <BsPencilFill size={9} />
-            </div>
-            <span className="font-semibold text-white/40">Pixora</span>
-            <span className="text-white/15">·</span>
-            <span className="whitespace-nowrap">Free, open-source canvas tool</span>
-          </div>
-          <a href="https://github.com/ELHart05/pixora" target="_blank" rel="noopener noreferrer"
-            className="flex items-center gap-1.5 hover:text-white/60 transition-colors shrink-0 whitespace-nowrap">
-            <BsGithub size={13} /> View on GitHub
-          </a>
-        </div>
-      </footer>
-
+      <SiteFooter />
     </div>
   );
 }
-
